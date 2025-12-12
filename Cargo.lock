@@ -167,7 +167,6 @@ dependencies = [
  "egui",
  "serde",
  "serde_json",
- "winapi",
 ]
 
 [[package]]

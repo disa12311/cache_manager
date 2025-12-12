@@ -1,4 +1,4 @@
-// Cargo.toml dependencies cần thiết:
+// Cargo.toml dependencies:
 // [package]
 // name = "cache_manager"
 // version = "1.0.0"
@@ -17,7 +17,7 @@
 // codegen-units = 1
 // strip = true
 
-// Ẩn console window trên Windows
+// Hide console window on Windows
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::fs;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -47,19 +48,72 @@ struct CacheManager {
     cache_size_gb: f32,
     is_cleaning: bool,
     status_message: String,
+    cache_dirs: Vec<PathBuf>,
 }
 
 impl CacheManager {
     fn new() -> Self {
         let config = Self::load_config().unwrap_or_default();
+        let cache_dirs = Self::get_cache_directories();
         
         Self {
             config,
             last_clean_time: Arc::new(Mutex::new(None)),
             cache_size_gb: 0.0,
             is_cleaning: false,
-            status_message: String::from("Sẵn sàng"),
+            status_message: String::from("Ready"),
+            cache_dirs,
         }
+    }
+
+    fn get_cache_directories() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        
+        // Windows cache directories only
+        if cfg!(target_os = "windows") {
+            // Windows Temp
+            dirs.push(std::env::temp_dir());
+            
+            // Local AppData Temp
+            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+                dirs.push(PathBuf::from(local_appdata).join("Temp"));
+            }
+            
+            // Internet Explorer Cache
+            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+                dirs.push(PathBuf::from(local_appdata).join("Microsoft").join("Windows").join("INetCache"));
+            }
+            
+            // Windows Update Cache
+            dirs.push(PathBuf::from("C:\\Windows\\SoftwareDistribution\\Download"));
+            
+            // Prefetch
+            dirs.push(PathBuf::from("C:\\Windows\\Prefetch"));
+            
+            // Browser caches
+            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+                let local = PathBuf::from(local_appdata);
+                
+                // Chrome Cache
+                dirs.push(local.join("Google").join("Chrome").join("User Data").join("Default").join("Cache"));
+                
+                // Edge Cache
+                dirs.push(local.join("Microsoft").join("Edge").join("User Data").join("Default").join("Cache"));
+                
+                // Firefox Cache
+                if let Ok(appdata) = std::env::var("APPDATA") {
+                    let firefox_profiles = PathBuf::from(appdata).join("Mozilla").join("Firefox").join("Profiles");
+                    if let Ok(entries) = fs::read_dir(&firefox_profiles) {
+                        for entry in entries.flatten() {
+                            dirs.push(entry.path().join("cache2"));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Filter only existing directories
+        dirs.into_iter().filter(|d| d.exists()).collect()
     }
 
     fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -76,16 +130,13 @@ impl CacheManager {
     }
 
     fn config_path() -> PathBuf {
-        // Sử dụng thư mục AppData cho Windows
         let mut path = if cfg!(target_os = "windows") {
-            // Windows: C:\Users\<username>\AppData\Roaming\CacheManager
             dirs::config_dir()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
         } else {
             std::env::current_dir().unwrap_or_default()
         };
         
-        // Tạo thư mục nếu chưa tồn tại
         if cfg!(target_os = "windows") {
             path.push("CacheManager");
             std::fs::create_dir_all(&path).ok();
@@ -95,69 +146,73 @@ impl CacheManager {
         path
     }
 
-    fn get_cache_size(&mut self) -> f32 {
-        // Windows cache directories
-        let temp_dirs = if cfg!(target_os = "windows") {
-            vec![
-                std::env::temp_dir(), // C:\Users\<user>\AppData\Local\Temp
-                PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-                    .join("Temp"),
-            ]
-        } else {
-            vec![std::env::temp_dir()]
-        };
-
+    fn calculate_dir_size(path: &PathBuf) -> u64 {
         let mut total_size: u64 = 0;
-        for dir in temp_dirs {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
+        
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
                         total_size += metadata.len();
+                    } else if metadata.is_dir() {
+                        // Recursive for subdirectories
+                        total_size += Self::calculate_dir_size(&entry.path());
                     }
                 }
             }
+        }
+        
+        total_size
+    }
+
+    fn get_cache_size(&mut self) -> f32 {
+        let mut total_size: u64 = 0;
+        
+        for cache_dir in &self.cache_dirs {
+            total_size += Self::calculate_dir_size(cache_dir);
         }
 
         (total_size as f32) / (1024.0 * 1024.0 * 1024.0) // Convert to GB
     }
 
-    fn clean_cache(&mut self) {
-        self.is_cleaning = true;
-        self.status_message = String::from("Đang xóa cache...");
-
-        // Windows temp directories
-        let temp_dirs = if cfg!(target_os = "windows") {
-            vec![
-                std::env::temp_dir(),
-                PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-                    .join("Temp"),
-            ]
-        } else {
-            vec![std::env::temp_dir()]
-        };
-
-        let mut cleaned_count = 0;
-        let mut cleaned_size: u64 = 0;
-
-        for temp_dir in temp_dirs {
-            if let Ok(entries) = std::fs::read_dir(&temp_dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.is_file() {
-                            let file_size = metadata.len();
-                            // Chỉ xóa file nếu có thể (bỏ qua file đang được sử dụng)
-                            if std::fs::remove_file(entry.path()).is_ok() {
-                                cleaned_count += 1;
-                                cleaned_size += file_size;
-                            }
+    fn clean_directory(path: &PathBuf, cleaned_count: &mut u32, cleaned_size: &mut u64) {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    let entry_path = entry.path();
+                    
+                    if metadata.is_file() {
+                        let file_size = metadata.len();
+                        // Try to delete file, skip if in use
+                        if fs::remove_file(&entry_path).is_ok() {
+                            *cleaned_count += 1;
+                            *cleaned_size += file_size;
                         }
+                    } else if metadata.is_dir() {
+                        // Clean subdirectories recursively
+                        Self::clean_directory(&entry_path, cleaned_count, cleaned_size);
+                        // Try to remove empty directory
+                        fs::remove_dir(&entry_path).ok();
                     }
                 }
             }
         }
+    }
+
+    fn clean_cache(&mut self) {
+        self.is_cleaning = true;
+        self.status_message = String::from("Cleaning cache...");
+
+        let mut cleaned_count = 0;
+        let mut cleaned_size: u64 = 0;
+
+        // Clean each cache directory
+        for cache_dir in &self.cache_dirs {
+            Self::clean_directory(cache_dir, &mut cleaned_count, &mut cleaned_size);
+        }
 
         let cleaned_gb = (cleaned_size as f32) / (1024.0 * 1024.0 * 1024.0);
-        self.status_message = format!("✅ Đã xóa {} file ({:.2} GB)", cleaned_count, cleaned_gb);
+        self.status_message = format!("✅ Cleaned {} files ({:.2} GB)", cleaned_count, cleaned_gb);
 
         *self.last_clean_time.lock().unwrap() = Some(Instant::now());
         self.is_cleaning = false;
@@ -169,14 +224,14 @@ impl CacheManager {
             return false;
         }
 
-        // Kiểm tra nếu đã qua 30 giây từ lần xóa cuối
+        // Check if 30 seconds have passed since last clean
         if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
             if last_time.elapsed() < Duration::from_secs(30) {
                 return false;
             }
         }
 
-        // Kiểm tra nếu cache vượt ngưỡng
+        // Check if cache exceeds threshold
         self.cache_size_gb >= self.config.cache_threshold_gb
     }
 }
@@ -186,7 +241,7 @@ impl eframe::App for CacheManager {
         // Update cache size
         self.cache_size_gb = self.get_cache_size();
 
-        // Auto clean nếu cần
+        // Auto clean if needed
         if self.should_auto_clean() && !self.is_cleaning {
             self.clean_cache();
         }
@@ -205,9 +260,9 @@ impl eframe::App for CacheManager {
                     
                     ui.add_space(30.0);
 
-                    // Hiển thị kích thước cache hiện tại
+                    // Display current cache size
                     ui.label(
-                        egui::RichText::new(format!("📊 Kích thước cache hiện tại: {:.2} GB", self.cache_size_gb))
+                        egui::RichText::new(format!("📊 Current cache size: {:.2} GB", self.cache_size_gb))
                             .size(18.0)
                             .color(egui::Color32::WHITE)
                     );
@@ -226,7 +281,7 @@ impl eframe::App for CacheManager {
                     // Threshold slider
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("🎚️ Ngưỡng bộ nhớ đệm (GB):")
+                            egui::RichText::new("🎚️ Cache threshold (GB):")
                                 .size(16.0)
                                 .color(egui::Color32::WHITE)
                         );
@@ -245,7 +300,7 @@ impl eframe::App for CacheManager {
                     ui.add_space(10.0);
                     
                     ui.label(
-                        egui::RichText::new(format!("Sẽ tự động xóa khi cache đạt {:.0} GB", threshold))
+                        egui::RichText::new(format!("Auto-clean when cache reaches {:.0} GB", threshold))
                             .size(13.0)
                             .color(egui::Color32::from_rgb(180, 180, 180))
                     );
@@ -255,7 +310,7 @@ impl eframe::App for CacheManager {
                     // Auto clean checkbox
                     ui.checkbox(
                         &mut self.config.auto_clean_enabled,
-                        egui::RichText::new("🔄 Bật tự động xóa sau 30 giây")
+                        egui::RichText::new("🔄 Enable auto-clean after 30 seconds")
                             .size(15.0)
                             .color(egui::Color32::WHITE)
                     );
@@ -266,13 +321,13 @@ impl eframe::App for CacheManager {
                     if ui.add_sized(
                         [200.0, 40.0],
                         egui::Button::new(
-                            egui::RichText::new("💾 Lưu cấu hình")
+                            egui::RichText::new("💾 Save Configuration")
                                 .size(16.0)
                         )
                     ).clicked() {
                         match self.save_config() {
-                            Ok(_) => self.status_message = String::from("✅ Đã lưu cấu hình"),
-                            Err(e) => self.status_message = format!("❌ Lỗi: {}", e),
+                            Ok(_) => self.status_message = String::from("✅ Configuration saved"),
+                            Err(e) => self.status_message = format!("❌ Error: {}", e),
                         }
                     }
 
@@ -282,7 +337,7 @@ impl eframe::App for CacheManager {
                     if ui.add_sized(
                         [200.0, 40.0],
                         egui::Button::new(
-                            egui::RichText::new("🧹 Xóa cache ngay")
+                            egui::RichText::new("🧹 Clean Cache Now")
                                 .size(16.0)
                         )
                     ).clicked() {
@@ -298,11 +353,11 @@ impl eframe::App for CacheManager {
 
                     ui.add_space(20.0);
 
-                    // Info về thời gian xóa cuối
+                    // Info about last clean time
                     if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
                         let elapsed = last_time.elapsed().as_secs();
                         ui.label(
-                            egui::RichText::new(format!("⏱️ Lần xóa cuối: {} giây trước", elapsed))
+                            egui::RichText::new(format!("⏱️ Last cleaned: {} seconds ago", elapsed))
                                 .size(13.0)
                                 .color(egui::Color32::from_rgb(150, 150, 150))
                         );
@@ -310,7 +365,7 @@ impl eframe::App for CacheManager {
                 });
             });
 
-        // Request repaint để cập nhật UI
+        // Request repaint to update UI
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 }

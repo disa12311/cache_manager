@@ -2,8 +2,8 @@
 name = "cache_manager"
 version = "1.0.0"
 edition = "2021"
-authors = ["Your Name"]
-description = "Cache Manager - Quản lý bộ nhớ đệm tự động"
+authors = ["Cache Manager Team"]
+description = "Automatic Cache Cleaner for Windows"
 
 [dependencies]
 eframe = { version = "0.24", default-features = false, features = ["default_fonts", "glow"] }
@@ -12,23 +12,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"
 
-# Thêm winapi với đầy đủ features cho cross-compile
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "windef", "shellapi", "winnls"] }
-
 # Tối ưu hóa cho release build
 [profile.release]
-opt-level = 3           # Tối ưu hóa tối đa
+opt-level = "z"         # Tối ưu kích thước file
 lto = true              # Link Time Optimization
 codegen-units = 1       # Tối ưu hóa cross-crate
 strip = true            # Loại bỏ debug symbols
 panic = "abort"         # Giảm kích thước binary
 
-# Cấu hình Windows để ẩn console
+# Cấu hình binary
 [[bin]]
 name = "cache_manager"
 path = "src/main.rs"
-
-# Ẩn console window trên Windows (chỉ release build)
-[target.'cfg(windows)'.profile.release]
-strip = true
