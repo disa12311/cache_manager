@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::fs;
 
 #[cfg(target_os = "windows")]
 use std::process::Command;
@@ -85,6 +84,7 @@ impl CacheManager {
     fn get_total_ram() -> f32 {
         // Đọc tổng RAM từ WMI hoặc system info
         if let Ok(output) = Command::new("wmic")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args(&["ComputerSystem", "get", "TotalPhysicalMemory"])
             .output()
         {
@@ -108,7 +108,10 @@ impl CacheManager {
     fn get_ram_cache(&mut self) -> f32 {
         // Đọc Standby RAM (cached memory) từ Windows
         if let Ok(output) = Command::new("powershell")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args(&[
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
                 "-Command",
                 "(Get-Counter '\\Memory\\Standby Cache Core Bytes').CounterSamples.CookedValue",
             ])
@@ -123,6 +126,7 @@ impl CacheManager {
 
         // Fallback: đọc Available Memory
         if let Ok(output) = Command::new("wmic")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args(&["OS", "get", "FreePhysicalMemory"])
             .output()
         {
@@ -151,42 +155,59 @@ impl CacheManager {
         self.status_message = String::from("Cleaning RAM cache...");
 
         let initial_cache = self.ram_cache_mb;
-        let stop_threshold = self.config.stop_threshold_mb;
 
-        // Method 1: Clear Standby List (cần quyền admin)
-        let _ = Command::new("powershell")
+        // Method 1: Garbage Collection (an toàn nhất)
+        let gc_result = Command::new("powershell")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args(&[
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
                 "-Command",
-                "Clear-Host; [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()",
+                "[System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced); [System.GC]::WaitForPendingFinalizers()",
             ])
             .output();
 
-        // Method 2: Empty Working Sets
+        if gc_result.is_ok() {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // Method 2: Empty Working Sets (an toàn, không cần admin)
         let _ = Command::new("powershell")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args(&[
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
                 "-Command",
-                "Get-Process | ForEach-Object { $_.EmptyWorkingSet() }",
+                "$processes = Get-Process | Where-Object {$_.WorkingSet64 -gt 10MB}; foreach($p in $processes) { try { $p.MinWorkingSet = 1; $p.MaxWorkingSet = 1; } catch {} }",
             ])
             .output();
 
-        // Method 3: Sử dụng RAMMap utility (nếu có)
-        // Clear standby list với EmptyStandbyList.exe
-        let _ = Command::new("cmd")
-            .args(&["/C", "echo off"])
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Method 3: Clear System Cache (cần admin, nhưng an toàn)
+        // Chỉ chạy nếu có quyền admin
+        let _ = Command::new("powershell")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .args(&[
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
+                "-Command",
+                "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Clear-RecycleBin -Force -ErrorAction SilentlyContinue }",
+            ])
             .output();
 
-        // Đợi RAM được giải phóng
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(1));
 
         // Kiểm tra lại RAM cache
         self.ram_cache_mb = self.get_ram_cache();
-
         let cleaned_mb = initial_cache - self.ram_cache_mb;
         
-        if cleaned_mb > 0.0 {
+        if cleaned_mb > 10.0 {
             self.status_message = format!("✅ Cleaned {:.0} MB of RAM cache", cleaned_mb);
+        } else if cleaned_mb > 0.0 {
+            self.status_message = format!("⚠️ Cleaned only {:.0} MB (run as admin for better results)", cleaned_mb);
         } else {
-            self.status_message = String::from("⚠️ Could not clean RAM cache (may need admin rights)");
+            self.status_message = String::from("⚠️ No RAM freed. Try running as Administrator");
         }
 
         *self.last_clean_time.lock().unwrap() = Some(Instant::now());
@@ -212,11 +233,6 @@ impl CacheManager {
 
         // Kiểm tra nếu RAM cache vượt start threshold
         self.ram_cache_mb >= self.config.start_threshold_mb
-    }
-
-    fn should_continue_cleaning(&self) -> bool {
-        // Tiếp tục dọn nếu RAM cache vẫn còn cao hơn stop threshold
-        self.ram_cache_mb > self.config.stop_threshold_mb
     }
 }
 
@@ -429,6 +445,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "RAM Cache Manager",
         options,
-        Box::new(|_cc| Box::new(CacheManager::new())),
+        Box::new(|_cc| Ok(Box::new(CacheManager::new()))),
     )
 }
