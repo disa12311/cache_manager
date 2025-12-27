@@ -6,13 +6,15 @@ use std::sync::Mutex;
 use tauri::State;
 
 #[cfg(target_os = "windows")]
-use winapi::um::memoryapi::VirtualAlloc;
+use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
-use winapi::um::memoryapi::VirtualFree;
+use windows::Win32::System::Memory::*;
 #[cfg(target_os = "windows")]
-use winapi::um::sysinfoapi::{GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO};
+use windows::Win32::System::ProcessStatus::*;
 #[cfg(target_os = "windows")]
-use winapi::um::winnt::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+use windows::Win32::System::SystemInformation::*;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::*;
 
 #[derive(Default)]
 struct AppState {
@@ -52,7 +54,7 @@ fn get_memory_info() -> Result<MemoryInfo, String> {
         let mut mem_status: MEMORYSTATUSEX = std::mem::zeroed();
         mem_status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
 
-        if GlobalMemoryStatusEx(&mut mem_status) == 0 {
+        if GlobalMemoryStatusEx(&mut mem_status).is_err() {
             return Err("Failed to get memory status".to_string());
         }
 
@@ -91,18 +93,18 @@ fn clean_memory_cache(target_mb: u64) -> Result<u64, String> {
         // Method 1: Force memory to be paged out by allocating and freeing
         for _ in 0..max_iterations {
             let ptr = VirtualAlloc(
-                std::ptr::null_mut(),
-                chunk_size as usize,
+                None,
+                chunk_size,
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_READWRITE,
             );
 
             if !ptr.is_null() {
                 // Write to memory to ensure it's committed
-                std::ptr::write_bytes(ptr as *mut u8, 0, chunk_size as usize);
+                std::ptr::write_bytes(ptr as *mut u8, 0, chunk_size);
                 
                 // Free immediately
-                VirtualFree(ptr, 0, MEM_RELEASE);
+                let _ = VirtualFree(ptr, 0, MEM_RELEASE);
                 cleaned_mb += 100;
             } else {
                 break;
@@ -113,11 +115,8 @@ fn clean_memory_cache(target_mb: u64) -> Result<u64, String> {
         }
 
         // Method 2: Clear working set of current process
-        use winapi::um::processthreadsapi::GetCurrentProcess;
-        use winapi::um::psapi::EmptyWorkingSet;
-        
         let process = GetCurrentProcess();
-        EmptyWorkingSet(process);
+        let _ = EmptyWorkingSet(process);
 
         Ok(cleaned_mb)
     }
@@ -145,6 +144,7 @@ fn load_config(state: State<AppState>) -> Result<Config, String> {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             get_memory_info,
             clean_memory_cache,

@@ -260,7 +260,7 @@
     <div class="container">
         <div class="header">
             <h1>🧠 Memory Cache Manager</h1>
-            <p class="version">Version 1.0.0</p>
+            <p class="version">Version 1.0.0 (Tauri 2.0)</p>
         </div>
 
         <div class="card">
@@ -318,12 +318,13 @@
 
         <div class="footer">
             ⚠️ Run as Administrator for best results<br>
-            Windows Memory Cache Manager
+            Windows Memory Cache Manager (Tauri 2.0)
         </div>
     </div>
 
-    <script>
-        const { invoke } = window.__TAURI__.tauri;
+    <script type="module">
+        // Tauri 2.0 API
+        import { invoke } from 'https://unpkg.com/@tauri-apps/api@2/core';
 
         let config = {
             start_threshold_mb: 2048,
